@@ -1,5 +1,5 @@
 # ============================================================
-# AIDRegressor — structured like THAID, algorithm = AID
+# AIDRegressor — 
 # Morgan & Sonquist (1963) — SSE reduction
 # ============================================================
 
@@ -182,4 +182,3 @@ predict_one <- function(node, row) {
     else node <- node$right
   }
 }
-
