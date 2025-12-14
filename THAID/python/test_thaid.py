@@ -8,7 +8,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+from thaid import THAID
 
 class THAIDTester:
     """Comprehensive testing for THAID algorithm."""
