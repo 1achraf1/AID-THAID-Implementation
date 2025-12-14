@@ -1,0 +1,51 @@
+---
+title: "Comprendre l'algorithme AID"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Comprendre l'algorithme AID}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Contexte historique
+
+L'algorithme AID (Morgan & Sonquist, 1963) recherche récursivement le meilleur split binaire sur l'ensemble des variables prédictives en maximisant la réduction de variance. Les paramètres historiques sont :
+
+- **R** : taille minimale des sous-classes filles,
+- **M** : taille minimale d'un nœud pour être éligible à une partition,
+- **Q** : profondeur maximale (racine = 0).
+
+La décision de split repose sur le gain de somme des carrés (SSE) et un F-test descriptif.
+
+## Méthode
+
+Pour un nœud de taille `n` :
+
+1. Pour chaque variable, ordonner les observations et calculer les SSE partielles via sommes cumulées.
+2. Évaluer tous les seuils admissibles (respectant R) et retenir celui qui maximise la réduction de SSE.
+3. Arrêter si le gain est insuffisant ou si les contraintes (R, M, Q) sont atteintes.
+
+## Implémentation RAID
+
+```{r}
+library(RAID)
+set.seed(42)
+X <- matrix(rnorm(200), ncol = 2)
+y <- ifelse(X[,1] > 0, 1, 0) + 0.2 * X[,2]
+
+model <- aid_regressor(X, y, R = 5, M = 10, Q = 4, min_gain = 1e-3)
+str(model$root)
+```
+
+## Diagnostic
+
+```{r}
+model$history
+```
+
+Chaque entrée correspond à un split avec son gain et son F-statistique descriptif.
+***

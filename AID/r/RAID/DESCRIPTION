@@ -1,0 +1,18 @@
+Package: RAID
+Type: Package
+Title: Automatic Interaction Detection (AID) for Regression
+Version: 0.1.0
+Authors@R: person("DJERI-ALASSANI", "OUBENOUPOU", role = c("aut", "cre"), email = "djeryala@gmail.com")
+Description: Implementation fidèle de l'algorithme AID (Morgan & Sonquist, 1963) pour des tâches de régression, incluant visualisation, export d'arbre et tests unitaires.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.3
+Imports:
+    stats,
+    ggplot2
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr

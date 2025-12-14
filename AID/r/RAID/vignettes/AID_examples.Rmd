@@ -1,0 +1,42 @@
+---
+title: "Exemples d'utilisation d'RAID"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Exemples RAID}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Données synthétiques non linéaires
+
+```{r}
+library(RAID)
+set.seed(123)
+X <- cbind(runif(300, -2, 2), runif(300, -2, 2))
+signal <- ifelse(X[,1] > 0, 1, 0) + 0.4 * sin(X[,2])
+y <- signal + rnorm(300, sd = 0.2)
+
+model <- aid_regressor(X, y, R = 8, M = 16, Q = 4, min_gain = 1e-3)
+head(model$history)
+```
+
+## Visualisation
+
+```{r fig.width=7, fig.height=4}
+plot_aid_tree(model)
+```
+
+```{r fig.width=6, fig.height=4}
+plot_aid_split(X, y, model$root)
+```
+
+## Mesures
+
+- Réduction totale de variance : `r model$root$sse - (model$root$left$sse + model$root$right$sse)`
+- Profondeur finale : `r max(sapply(model$history, function(h) h$depth))`
+- Nombre de splits : `r length(model$history)`
+***

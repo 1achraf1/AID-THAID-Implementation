@@ -1,0 +1,7 @@
+export(aid_regressor)
+export(predict_aid)
+export(plot_aid_tree)
+export(plot_aid_split)
+importFrom(ggplot2, ggplot, aes, geom_point, geom_vline, geom_segment, geom_text, labs, theme_minimal)
+importFrom(stats, complete.cases)
+

@@ -1,0 +1,41 @@
+---
+title: "README"
+output: html_document
+---
+
+RAID: AID en R
+================
+
+Implémentation en R de l’algorithme Automatic Interaction Detection (AID) version 1963 pour la régression, pensée pour la reproductibilité pédagogique.
+
+Points clés
+-----------
+- `aid_regressor()` suit les paramètres historiques R (taille minimale des sous-classes), M (taille minimale pour tenter un split) et Q (profondeur maximale).
+- Calculs préalloués et vectorisés pour limiter les copies.
+- Structure de nœud S3 légère, exportable en liste imbriquée.
+- Visualisation de l’arbre via `ggplot2`.
+- Tests unitaires `testthat` et vignettes détaillées.
+
+Installation locale
+-------------------
+```r
+devtools::install_local(\"RAID\")
+```
+
+Exemple rapide
+--------------
+```r
+library(RAID)
+set.seed(1)
+X <- matrix(rnorm(200), ncol = 2)
+y <- ifelse(X[, 1] > 0, 1, 0) + 0.3 * X[, 2]
+
+model <- aid_regressor(X, y, R = 5, M = 10, Q = 4)
+preds <- predict_aid(model, X[1:5, ])
+print(model$history)
+```
+
+Référence
+---------
+- Morgan, J. N., & Sonquist, J. A. (1963). *Problems in the analysis of survey data, and a proposal*. JASA, 58(302), 415‑434.
+- https://youtu.be/47PN2VG3RmI?si=oRElgE2vD6Z0hU93    by Wolf Riepl 
