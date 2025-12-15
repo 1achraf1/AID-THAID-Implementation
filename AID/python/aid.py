@@ -1,8 +1,7 @@
-# =========================
-# pyAID (optimized structure)
-# Automatic Interaction Detection (AID) for regression
-# Morgan & Sonquist (1963) - educational, variance/SSE reduction
-# =========================
+# ============================================================
+# AIDRegressor — 
+# Morgan & Sonquist (1963) — SSE reduction
+# ============================================================
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Union
