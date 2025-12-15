@@ -2,12 +2,6 @@
 # pyAID (optimized structure)
 # Automatic Interaction Detection (AID) for regression
 # Morgan & Sonquist (1963) - educational, variance/SSE reduction
-#
-# Key upgrades vs your initial code:
-# 1) NO X/y copying per node: we pass sample indices (THAID-like structure)
-# 2) Optional presort of features once in fit (faster split search on big n)
-# 3) Faster predict: batch/stack traversal (no per-row Python loop)
-# 4) History now stores more node stats (parent/children SSE/means)
 # =========================
 
 from dataclasses import dataclass
