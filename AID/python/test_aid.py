@@ -1,29 +1,7 @@
-"""
-aid_test_suite.py
-=================
-One-file test suite for AIDRegressor (regression) in the same spirit as your THAIDTester.
-
-What it does:
-- Loads multiple regression datasets (sklearn + OpenML if available)
-- Basic train/test evaluation (RMSE/MAE/R2) + timing (fit/predict)
-- Cross-validation (KFold) evaluation
-- Parameter sensitivity (R, M, Q, min_gain)
-- Comparison with sklearn DecisionTreeRegressor + HistGradientBoostingRegressor
-- Edge cases (tiny samples, single feature)
-- Saves: aid_results.csv + aid_cv_results.csv + (optional) plots + aid_test_report.txt
-
-Run:
-  python aid_test_suite.py
-
-Notes:
-- You must have your AIDRegressor available in import path.
-  Option A: put AIDRegressor code in aid.py and do: from aid import AIDRegressor
-  Option B: paste AIDRegressor code above in this file (same file).
-"""
-
 import time
 import gc
 import sys
+import os
 import warnings
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
@@ -36,7 +14,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.datasets import fetch_california_housing, load_diabetes, make_friedman1
-from aid import AIDRegressor
+from aid import AID
+
 # Optional plotting (safe if missing)
 try:
     import matplotlib.pyplot as plt
@@ -48,7 +27,6 @@ try:
     import openml
 except Exception:
     openml = None
-
 
 
 # ------------------------------------------------------------
@@ -87,7 +65,7 @@ def _metrics(y_test, pred) -> Dict[str, float]:
 # Tester
 # ------------------------------------------------------------
 class AIDTester:
-    """Comprehensive testing for AIDRegressor (regression)."""
+    """Comprehensive testing for AID (regression)."""
 
     def __init__(self):
         self.results: Dict[str, Any] = {}
@@ -145,8 +123,30 @@ class AIDTester:
                 except Exception as e:
                     print(f"[OpenML] Could not load {name} (id={openml_id}): {e}")
 
-        return datasets
+        
+        # ------------------------------------------------------------
+        # Export datasets for R (shared_datasets/*.csv)
+        # No prints here to preserve output shape.
+        # ------------------------------------------------------------
+        os.makedirs("shared_datasets", exist_ok=True)
+        for _k, _d in datasets.items():
+            _X = _d["X"]
+            _y = _d["y"]
 
+            if hasattr(_X, "to_csv"):
+                _X_df = _X
+            else:
+                _X_df = pd.DataFrame(_X)
+
+            _X_df.to_csv(f"shared_datasets/{_k}_X.csv", index=False)
+
+            # y as single column, no header (easy to read in R)
+            pd.Series(np.asarray(_y, dtype=float)).to_csv(
+                f"shared_datasets/{_k}_y.csv", index=False, header=False
+            )
+
+
+        return datasets
     # -----------------------
     # Basic test
     # -----------------------
@@ -169,7 +169,7 @@ class AIDTester:
 
             # Models: AID + DecisionTree + HGB
             model_specs = [
-                ("AID", lambda: AIDRegressor(R=15, M=30, Q=6, min_gain=1e-3, store_history=True, presort=True)),
+                ("AID", lambda: AID(min_samples_leaf=15, min_samples_split=30, max_depth=6, min_gain=1e-3, store_history=True, presort=True)),
                 ("DecisionTreeRegressor", lambda: DecisionTreeRegressor(random_state=random_state)),
                 ("HistGradientBoostingRegressor", lambda: HistGradientBoostingRegressor(random_state=random_state)),
             ]
@@ -211,7 +211,7 @@ class AIDTester:
         kf = KFold(n_splits=cv, shuffle=True, random_state=random_state)
 
         model_specs = [
-            ("AID", lambda: AIDRegressor(R=15, M=30, Q=6, min_gain=1e-3, store_history=False, presort=True)),
+            ("AID", lambda: AID(min_samples_leaf=15, min_samples_split=30, max_depth=6, min_gain=1e-3, store_history=False, presort=True)),
             ("DecisionTreeRegressor", lambda: DecisionTreeRegressor(random_state=random_state)),
             ("HistGradientBoostingRegressor", lambda: HistGradientBoostingRegressor(random_state=random_state)),
         ]
@@ -272,11 +272,11 @@ class AIDTester:
         print("=" * 90)
 
         param_configs = [
-            {"R": 10, "M": 20, "Q": 4, "min_gain": 0.0},
-            {"R": 15, "M": 30, "Q": 6, "min_gain": 1e-3},
-            {"R": 20, "M": 40, "Q": 6, "min_gain": 1e-3},
-            {"R": 15, "M": 30, "Q": 8, "min_gain": 1e-3},
-            {"R": 30, "M": 60, "Q": 5, "min_gain": 1e-3},
+            {"min_samples_leaf": 10, "min_samples_split": 20, "max_depth": 4, "min_gain": 0.0},
+            {"min_samples_leaf": 15, "min_samples_split": 30, "max_depth": 6, "min_gain": 1e-3},
+            {"min_samples_leaf": 20, "min_samples_split": 40, "max_depth": 6, "min_gain": 1e-3},
+            {"min_samples_leaf": 15, "min_samples_split": 30, "max_depth": 8, "min_gain": 1e-3},
+            {"min_samples_leaf": 30, "min_samples_split": 60, "max_depth": 5, "min_gain": 1e-3},
         ]
 
         rows = []
@@ -292,9 +292,13 @@ class AIDTester:
 
             for i, params in enumerate(param_configs, 1):
                 try:
-                    model = AIDRegressor(
-                        R=params["R"], M=params["M"], Q=params["Q"], min_gain=params["min_gain"],
-                        store_history=False, presort=True
+                    model = AID(
+                        min_samples_leaf=params["min_samples_leaf"],
+                        min_samples_split=params["min_samples_split"],
+                        max_depth=params["max_depth"],
+                        min_gain=params["min_gain"],
+                        store_history=False,
+                        presort=True
                     )
                     fit_s, pred_s, pred = _fit_predict_times(model, X_train, y_train, X_test)
                     m = _metrics(y_test, pred)
@@ -346,7 +350,7 @@ class AIDTester:
             print(f"\n{name.upper()}")
             print("-" * 70)
             try:
-                model = AIDRegressor(R=2, M=2, Q=3, min_gain=0.0, store_history=True, presort=True)
+                model = AID(min_samples_leaf=2, min_samples_split=2, max_depth=3, min_gain=0.0, store_history=True, presort=True)
                 model.fit(Xt, yt)
                 pred = model.predict(Xt)
                 m = _metrics(yt, pred)
@@ -377,7 +381,7 @@ class AIDTester:
 
         for r in range(repeats):
             gc.collect()
-            model = AIDRegressor(R=15, M=30, Q=6, min_gain=1e-3, store_history=True, presort=True)
+            model = AID(min_samples_leaf=15, min_samples_split=30, max_depth=6, min_gain=1e-3, store_history=True, presort=True)
             t0 = time.perf_counter()
             model.fit(X, y)
             t = time.perf_counter() - t0
