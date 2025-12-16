@@ -1,13 +1,3 @@
-# ============================================================================
-# AID (Automatic Interaction Detection) Regressor in R — SSE / least squares
-# ============================================================================
-# Key fixes vs your previous version:
-# - Correct split routing: left/right decided with split_value (midpoint), not with X_sorted[best_idx]
-# - Faster optimal split scan using cumulative sums (O(n) after sorting)
-# - Stop condition includes feasibility of two leaves of size >= min_samples_leaf
-# - Optional deterministic feature subsampling (max_features) via set.seed(random_state) at fit()
-# ============================================================================
-
 AIDNode <- setRefClass("AIDNode",
   fields = list(
     prediction = "numeric",
@@ -56,7 +46,8 @@ AIDRegressor <- setRefClass("AIDRegressor",
     X_ = "matrix",
     y_ = "numeric",
     history_ = "list",
-    n_leaves_ = "numeric"
+    n_leaves_ = "numeric",
+    sorted_indices_ = "list"
   ),
 
   methods = list(
@@ -84,6 +75,7 @@ AIDRegressor <- setRefClass("AIDRegressor",
       y_ <<- numeric(0)
       history_ <<- list()
       n_leaves_ <<- 0
+      sorted_indices_ <<- list()
     },
 
     validate_input = function(X, y) {
@@ -125,6 +117,8 @@ AIDRegressor <- setRefClass("AIDRegressor",
 
       set.seed(as.integer(random_state))
 
+      # Presort global : les variables numériques sont pré-triées une seule fois
+      # au fit afin d'éviter des tris répétés lors de la construction de l'arbre.
       sorted_indices_ <<- lapply(seq_len(n_features_), function(j) {
         order(X_[, j], method = "radix")
       })
@@ -138,34 +132,38 @@ AIDRegressor <- setRefClass("AIDRegressor",
       invisible(.self)
     },
 
+    # Version optimisée utilisant le presort global via sorted_indices_
     find_numeric_split = function(indices, feature_idx, parent_sse) {
-    
+      # Récupère l'ordre global pré-calculé pour cette variable
       global_ord <- sorted_indices_[[feature_idx]]
       
+      # Masque logique pour identifier les observations du nœud courant
       in_node <- logical(nrow(X_))
       in_node[indices] <- TRUE
       
+      # Filtre l'ordre global pour ne garder que les indices du nœud
       idx_sorted_global <- global_ord[in_node[global_ord]]
       
-      
+      # Valeurs triées pour ce nœud
       x_sorted <- X_[idx_sorted_global, feature_idx]
       y_sorted <- y_[idx_sorted_global]
       
       n <- length(y_sorted)
       if (n < 2 * min_samples_leaf) return(NULL)
 
+      # Positions de split candidates (où x change entre k et k+1)
       diff_mask <- x_sorted[-n] != x_sorted[-1]
-      
       if (!any(diff_mask)) return(NULL)
-      split_pos <- which(diff_mask)  
+      split_pos <- which(diff_mask)
 
+      # Contraintes de taille minimale des feuilles
       left_n <- split_pos
       right_n <- n - split_pos
       valid <- (left_n >= min_samples_leaf) & (right_n >= min_samples_leaf)
       split_pos <- split_pos[valid]
       if (length(split_pos) == 0) return(NULL)
 
-      # cumulative sums for fast SSE
+      # Sommes cumulées pour calcul rapide de SSE
       csum <- cumsum(y_sorted)
       csum2 <- cumsum(y_sorted * y_sorted)
       total_sum <- csum[n]
@@ -222,7 +220,6 @@ AIDRegressor <- setRefClass("AIDRegressor",
 
       y_subset <- y_[indices]
       node$prediction <- mean(y_subset)
-      # SSE using centered sum-of-squares
       node$sse <- sum((y_subset - node$prediction)^2)
 
       if (should_stop(node, depth)) {
@@ -269,7 +266,7 @@ AIDRegressor <- setRefClass("AIDRegressor",
     find_best_split = function(indices, parent_sse) {
       if (length(indices) < 2 * min_samples_leaf) return(NULL)
 
-      # choose subset of features (optional)
+      # Sélection aléatoire d'un sous-ensemble de variables si max_features < n_features_
       features_to_try <- if (max_features < n_features_) {
         sample(seq_len(n_features_), size = as.integer(max_features), replace = FALSE)
       } else {
@@ -288,71 +285,6 @@ AIDRegressor <- setRefClass("AIDRegressor",
       }
 
       best_result
-    },
-
-    find_numeric_split = function(indices, feature_idx, parent_sse) {
-      # sort indices by feature value
-      x <- X_[indices, feature_idx]
-      ord <- order(x, method = "radix")
-      x_sorted <- x[ord]
-      y_sorted <- y_[indices][ord]
-      idx_sorted_global <- indices[ord]
-
-      n <- length(y_sorted)
-      if (n < 2 * min_samples_leaf) return(NULL)
-
-      # candidate split positions where x changes (between k and k+1)
-      diff_mask <- x_sorted[-n] != x_sorted[-1]
-      if (!any(diff_mask)) return(NULL)
-      split_pos <- which(diff_mask)  # k in 1..n-1
-
-      # leaf size constraints
-      left_n <- split_pos
-      right_n <- n - split_pos
-      valid <- (left_n >= min_samples_leaf) & (right_n >= min_samples_leaf)
-      split_pos <- split_pos[valid]
-      if (length(split_pos) == 0) return(NULL)
-
-      # cumulative sums for fast SSE
-      csum <- cumsum(y_sorted)
-      csum2 <- cumsum(y_sorted * y_sorted)
-      total_sum <- csum[n]
-      total_sum2 <- csum2[n]
-
-      left_sum <- csum[split_pos]
-      left_sum2 <- csum2[split_pos]
-      right_sum <- total_sum - left_sum
-      right_sum2 <- total_sum2 - left_sum2
-
-      left_n_f <- as.numeric(split_pos)
-      right_n_f <- as.numeric(n - split_pos)
-
-      left_sse <- left_sum2 - (left_sum * left_sum) / left_n_f
-      right_sse <- right_sum2 - (right_sum * right_sum) / right_n_f
-
-      within_sse <- left_sse + right_sse
-      gains <- parent_sse - within_sse
-
-      best_i <- which.max(gains)
-      best_gain <- gains[best_i]
-      if (is.na(best_gain) || best_gain <= 0) return(NULL)
-
-      k <- split_pos[best_i]
-      split_value <- (x_sorted[k] + x_sorted[k + 1]) / 2.0
-
-      denom <- within_sse[best_i] / max(n - 2, 1)
-      f_stat <- if (denom > 0) best_gain / denom else Inf
-
-      left_idx <- idx_sorted_global[1:k]
-      right_idx <- idx_sorted_global[(k + 1):n]
-
-      list(
-        split_value = as.numeric(split_value),
-        gain = as.numeric(best_gain),
-        f_stat = as.numeric(f_stat),
-        left_idx = left_idx,
-        right_idx = right_idx
-      )
     },
 
     predict = function(X) {
