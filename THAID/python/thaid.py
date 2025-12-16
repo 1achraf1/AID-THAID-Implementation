@@ -2,16 +2,15 @@ import numpy as np
 from typing import Optional, Tuple, List
 from itertools import combinations
 
-
 class THAIDNode:
     """Node in a THAID tree."""
-    __slots__ = ('prediction', 'theta', 'n_samples', 'class_counts',
+    __slots__ = ('prediction', 'score', 'n_samples', 'class_counts',
                  'split_feature_idx', 'split_value', 'split_categories',
                  'is_numeric', 'left', 'right', 'is_leaf')
     
     def __init__(self):
         self.prediction = -1
-        self.theta = 0.0
+        self.score = 0.0  # Stores theta (accuracy) or delta depending on context
         self.n_samples = 0
         self.class_counts = None
         self.split_feature_idx = -1
@@ -22,13 +21,16 @@ class THAIDNode:
         self.right = None
         self.is_leaf = True
 
-
 class THAID:
     """
     THAID (Theta Automatic Interaction Detection) classifier.
     
     Parameters
     ----------
+    criterion : {'theta', 'delta'}, default='theta'
+        The splitting criterion to use.
+        - 'theta': Maximizes the sum of modal frequencies (classification accuracy).
+        - 'delta': Maximizes the distributional difference between child nodes.
     min_samples_split : int, default=20
         Minimum samples required to split a node
     min_samples_leaf : int, default=1
@@ -36,16 +38,22 @@ class THAID:
     max_depth : int, optional
         Maximum tree depth
     max_categories : int, default=10
-        Max categories for exhaustive search
+        Max categories for exhaustive search. If categories > max_categories,
+        a heuristic search (sorting by majority class probability) is used.
     """
     
     def __init__(
         self,
+        criterion: str = 'theta',
         min_samples_split: int = 20,
         min_samples_leaf: int = 1,
         max_depth: Optional[int] = None,
         max_categories: int = 10
     ):
+        if criterion not in ('theta', 'delta'):
+            raise ValueError("Criterion must be 'theta' or 'delta'")
+            
+        self.criterion = criterion
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
         self.max_depth = max_depth
@@ -122,6 +130,28 @@ class THAID:
             else:
                 self._sorted_indices.append(None)
     
+    def _calculate_split_score(self, left_counts, right_counts, n_total):
+        """Calculate the score for a split based on the selected criterion."""
+        if self.criterion == 'theta':
+            # Theta: Maximize accuracy (modal frequency)
+            return (np.max(left_counts) + np.max(right_counts)) / n_total
+        
+        elif self.criterion == 'delta':
+            # Delta: Maximize distributional difference
+            n_left = np.sum(left_counts)
+            n_right = np.sum(right_counts)
+            
+            if n_left == 0 or n_right == 0:
+                return 0.0
+            
+            p_left = left_counts / n_left
+            p_right = right_counts / n_right
+            
+            # L1 distance (Sum of absolute differences)
+            return np.sum(np.abs(p_left - p_right))
+        
+        return 0.0
+
     def _build_tree(self, indices, depth):
         """Build tree recursively."""
         node = THAIDNode()
@@ -131,7 +161,8 @@ class THAID:
         node.class_counts = np.bincount(y_subset, minlength=self.n_classes_)
         
         node.prediction = np.argmax(node.class_counts)
-        node.theta = node.class_counts[node.prediction] / node.n_samples
+        # Display score is always accuracy (theta) for readability
+        node.score = node.class_counts[node.prediction] / node.n_samples
         
         if self._should_stop(node, depth):
             return node
@@ -173,7 +204,7 @@ class THAID:
     
     def _find_best_split(self, indices):
         """Find best split across all features."""
-        best_theta = -1.0
+        best_score = -1.0
         best_result = None
         
         for feature_idx in range(self.n_features_):
@@ -182,8 +213,8 @@ class THAID:
             else:
                 result = self._find_categorical_split(indices, feature_idx)
             
-            if result is not None and result[1] > best_theta:
-                best_theta = result[1]
+            if result is not None and result[1] > best_score:
+                best_score = result[1]
                 best_result = (feature_idx,) + result
         
         return best_result
@@ -208,7 +239,7 @@ class THAID:
         right_counts = np.bincount(y_sorted, minlength=self.n_classes_)
         left_counts = np.zeros(self.n_classes_, dtype=np.int64)
         
-        best_theta = -1.0
+        best_score = -1.0
         best_split_val = None
         best_split_idx = None
         
@@ -220,10 +251,10 @@ class THAID:
                 right_counts[cls] -= 1
             
             current_idx = split_idx + 1
-            theta = (np.max(left_counts) + np.max(right_counts)) / n_total
+            score = self._calculate_split_score(left_counts, right_counts, n_total)
             
-            if theta > best_theta:
-                best_theta = theta
+            if score > best_score:
+                best_score = score
                 best_split_idx = split_idx
                 best_split_val = (X_sorted[split_idx] + X_sorted[split_idx + 1]) / 2.0
         
@@ -234,28 +265,29 @@ class THAID:
         left_indices = indices[np.isin(indices, relevant[left_mask])]
         right_indices = indices[np.isin(indices, relevant[~left_mask])]
         
-        return best_split_val, best_theta, left_indices, right_indices
+        return best_split_val, best_score, left_indices, right_indices
     
     def _find_categorical_split(self, indices, feature_idx):
-        """Find best categorical split."""
+        """Find best categorical split using Exhaustive OR Heuristic search."""
         X_col = self._X[indices, feature_idx]
         unique_vals = np.unique(X_col)
         
         if len(unique_vals) < 2:
             return None
-        
+            
+        # Decision: Exhaustive vs Heuristic
         if len(unique_vals) <= self.max_categories:
             return self._exhaustive_categorical(indices, feature_idx, unique_vals)
         else:
             return self._heuristic_categorical(indices, feature_idx, unique_vals)
     
     def _exhaustive_categorical(self, indices, feature_idx, unique_vals):
-        """Exhaustive search over category subsets."""
+        """Exhaustive search over category subsets O(2^C)."""
         X_col = self._X[indices, feature_idx]
         y_subset = self._y[indices]
         n_total = len(indices)
         
-        best_theta = -1.0
+        best_score = -1.0
         best_mask = None
         
         max_size = (len(unique_vals) // 2) + 1
@@ -273,35 +305,53 @@ class THAID:
                 counts_left = np.bincount(y_left, minlength=self.n_classes_)
                 counts_right = np.bincount(y_right, minlength=self.n_classes_)
                 
-                theta = (np.max(counts_left) + np.max(counts_right)) / n_total
+                score = self._calculate_split_score(counts_left, counts_right, n_total)
                 
-                if theta > best_theta:
-                    best_theta = theta
+                if score > best_score:
+                    best_score = score
                     best_mask = mask.copy()
         
         if best_mask is None:
             return None
         
-        return best_mask, best_theta, indices[best_mask], indices[~best_mask]
-    
+        return best_mask, best_score, indices[best_mask], indices[~best_mask]
+
     def _heuristic_categorical(self, indices, feature_idx, unique_vals):
-        """Heuristic search by sorting categories."""
+        """
+        Heuristic search for high-cardinality features O(C log C).
+        Sorts categories by the proportion of the majority class, then 
+        treats them as ordinal values to find the best split point.
+        """
         X_col = self._X[indices, feature_idx]
         y_subset = self._y[indices]
         n_total = len(indices)
         
+        #  Determine Majority Class of current node
         majority_class = np.argmax(np.bincount(y_subset, minlength=self.n_classes_))
         
-        scores = [(cat, np.mean(y_subset[X_col == cat] == majority_class)) 
-                  for cat in unique_vals]
-        scores.sort(key=lambda x: -x[1])
-        sorted_cats = [s[0] for s in scores]
+        # Score each category based on how often it predicts the majority class
+        # (This orders categories by probability P(Class=Majority | Category))
+        cat_scores = []
+        for cat in unique_vals:
+            mask = (X_col == cat)
+            if not np.any(mask):
+                continue
+            # Fraction of this category that belongs to the majority class
+            prob = np.mean(y_subset[mask] == majority_class)
+            cat_scores.append((cat, prob))
+            
+        # Sort categories by that probability
+        cat_scores.sort(key=lambda x: -x[1]) # Descending order
+        sorted_cats = [x[0] for x in cat_scores]
         
-        best_theta = -1.0
+        # Iterate through split points in the sorted list (like numerical split)
+        best_score = -1.0
         best_mask = None
         
         for i in range(1, len(sorted_cats)):
-            mask = np.isin(X_col, sorted_cats[:i])
+            # Split: Left = Top i categories, Right = Rest
+            current_left_cats = sorted_cats[:i]
+            mask = np.isin(X_col, current_left_cats)
             
             if not np.any(mask) or np.all(mask):
                 continue
@@ -312,17 +362,17 @@ class THAID:
             counts_left = np.bincount(y_left, minlength=self.n_classes_)
             counts_right = np.bincount(y_right, minlength=self.n_classes_)
             
-            theta = (np.max(counts_left) + np.max(counts_right)) / n_total
+            score = self._calculate_split_score(counts_left, counts_right, n_total)
             
-            if theta > best_theta:
-                best_theta = theta
+            if score > best_score:
+                best_score = score
                 best_mask = mask.copy()
-        
+                
         if best_mask is None:
             return None
-        
-        return best_mask, best_theta, indices[best_mask], indices[~best_mask]
-    
+
+        return best_mask, best_score, indices[best_mask], indices[~best_mask]
+
     def predict(self, X):
         """Predict class labels."""
         if self.root_ is None:
@@ -404,18 +454,19 @@ class THAID:
             
             if node.is_leaf:
                 print(f"{indent}Leaf: class={self.classes_[node.prediction]}, "
-                      f"theta={node.theta:.3f}, n={node.n_samples}")
+                      f"score={node.score:.3f}, n={node.n_samples}")
             else:
                 fname = self.feature_names_[node.split_feature_idx]
                 
                 if node.is_numeric:
                     print(f"{indent}{fname} <= {node.split_value:.3f} "
-                          f"(theta={node.theta:.3f}, n={node.n_samples})")
+                          f"(score={node.score:.3f}, n={node.n_samples})")
                 else:
                     print(f"{indent}{fname} in {list(node.split_categories)[:5]} "
-                          f"(theta={node.theta:.3f}, n={node.n_samples})")
+                          f"(score={node.score:.3f}, n={node.n_samples})")
                 
                 print_node(node.left, depth + 1)
                 print_node(node.right, depth + 1)
         
+        print(f"Splitting Criterion: {self.criterion.upper()}")
         print_node(self.root_)
