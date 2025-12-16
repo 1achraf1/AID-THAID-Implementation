@@ -1,10 +1,8 @@
-# ============================================================
-# AIDRegressor — 
-# Morgan & Sonquist (1963) — SSE reduction
-# ============================================================
+#AID
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Optional, List, Dict, Any, Union, Sequence, Tuple
 import json
 import numpy as np
 
@@ -27,174 +25,234 @@ def _ensure_1d_float(y: ArrayLike) -> np.ndarray:
     return y
 
 
-def _sse_from_stats(sum_y: float, sum_y2: float, n: int) -> float:
+def _compute_sse(sum_y: float, sum_y2: float, n: int) -> float:
+    """SSE = sum(y^2) - (sum(y)^2)/n"""
     if n <= 0:
         return 0.0
     return float(sum_y2 - (sum_y * sum_y) / n)
 
 
+def _resolve_max_features(max_features, n_features: int) -> int:
+    if max_features is None:
+        return n_features
+    if isinstance(max_features, str):
+        key = max_features.lower()
+        if key == "sqrt":
+            return max(1, int(np.sqrt(n_features)))
+        if key == "log2":
+            return max(1, int(np.log2(n_features)))
+        raise ValueError("max_features string must be one of: None, 'sqrt', 'log2'")
+    if isinstance(max_features, float):
+        if not (0.0 < max_features <= 1.0):
+            raise ValueError("max_features float must be in (0, 1].")
+        return max(1, int(np.ceil(max_features * n_features)))
+    # int-like
+    k = int(max_features)
+    if k <= 0:
+        raise ValueError("max_features must be >= 1")
+    return min(k, n_features)
+
+
 @dataclass
 class _SplitCandidate:
-    feature_index: int
-    threshold: float
+    feature_idx: int
+    split_value: float
     gain: float
     f_stat: float
-    left_idx: np.ndarray   # sample indices (global)
-    right_idx: np.ndarray  # sample indices (global)
+    left_indices: np.ndarray   # global indices
+    right_indices: np.ndarray  # global indices
 
 
-@dataclass
-class _Node:
-    depth: int
-    n: int
-    sse: float
-    mean: float
-    sum_y: float
-    sum_y2: float
-    feature_index: Optional[int] = None
-    threshold: Optional[float] = None
-    gain: float = 0.0
-    f_stat: Optional[float] = None
-    left: Optional["_Node"] = None
-    right: Optional["_Node"] = None
+class AIDNode:
+    __slots__ = (
+        "depth", "n_samples", "sse", "prediction", "sum_y", "sum_y2",
+        "split_feature_idx", "split_value", "gain", "f_stat",
+        "left", "right"
+    )
+
+    def __init__(self, depth: int, n_samples: int, sse: float, prediction: float,
+                 sum_y: float, sum_y2: float):
+        self.depth = depth
+        self.n_samples = n_samples
+        self.sse = sse
+        self.prediction = prediction
+        self.sum_y = sum_y
+        self.sum_y2 = sum_y2
+
+        self.split_feature_idx: Optional[int] = None
+        self.split_value: Optional[float] = None
+        self.gain: float = 0.0
+        self.f_stat: Optional[float] = None
+        self.left: Optional["AIDNode"] = None
+        self.right: Optional["AIDNode"] = None
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.split_feature_idx is None
 
 
-class AIDRegressor:
+class AID:
     """
-    AIDRegressor (Morgan & Sonquist, 1963) — regression tree by SSE reduction.
+    AID regressor using SSE reduction (least squares) splits.
 
     Parameters
     ----------
-    R : int
-        Minimum size for each child node (min_child_size).
-    M : int
-        Minimum size of a node to attempt a split.
-    Q : int
-        Maximum depth (root depth = 0).
-    min_gain : float
+    min_samples_leaf : int, default=5
+        Minimum samples per leaf (AID parameter R).
+    min_samples_split : int, default=10
+        Minimum samples in a node to attempt a split (AID parameter M).
+    max_depth : int, default=5
+        Maximum depth (root depth = 0) (AID parameter Q).
+    min_gain : float, default=0.0
         Minimum SSE reduction required to accept a split.
-    store_history : bool
-        Store split history (for analysis/teaching).
-    max_leaves : int
+    max_leaves : int, default=10**9
         Optional cap on number of leaves.
-    presort : bool
-        If True, presort each feature once at fit (often faster on large n).
+    presort : bool, default=True
+        If True, presort each feature once at fit and filter via node mask.
+    store_history : bool, default=False
+        Store split history.
+    max_features : None | int | float | {"sqrt","log2"}, default=None
+        Feature subsampling per node (like typical trees). If None uses all features.
+    random_state : int | None, default=0
+        RNG seed for feature subsampling (only relevant if max_features < n_features).
     """
 
     def __init__(
         self,
-        R: int = 5,
-        M: int = 10,
-        Q: int = 5,
+        min_samples_leaf: int = 5,
+        min_samples_split: int = 10,
+        max_depth: int = 5,
         min_gain: float = 0.0,
         store_history: bool = False,
         max_leaves: int = 10**9,
         presort: bool = True,
+        max_features=None,
+        random_state: Optional[int] = 0,
     ):
-        self.R = int(R)
-        self.M = int(M)
-        self.Q = int(Q)
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.min_samples_split = int(min_samples_split)
+        self.max_depth = int(max_depth)
         self.min_gain = float(min_gain)
         self.store_history = bool(store_history)
         self.max_leaves = int(max_leaves)
         self.presort = bool(presort)
+        self.max_features = max_features
+        self.random_state = random_state
 
-        self.root_: Optional[_Node] = None
+        self.root_: Optional[AIDNode] = None
         self.history_: List[Dict[str, Any]] = []
-        self._leaves = 0
+        self._n_leaves = 0
 
         # fitted state
         self._X: Optional[np.ndarray] = None
         self._y: Optional[np.ndarray] = None
-        self._sorted_idx: Optional[List[np.ndarray]] = None  # per feature sorted sample indices
+        self._sorted_indices: Optional[List[np.ndarray]] = None  # per feature sorted sample indices
         self.feature_names_: Optional[List[str]] = None
+        self.n_features_: int = 0
+
+        self._rng = np.random.default_rng(random_state)
 
     # -----------------------------
     # Fit
     # -----------------------------
-    def fit(self, X: ArrayLike, y: ArrayLike, feature_names: Optional[List[str]] = None) -> "AIDRegressor":
-        Xn = _ensure_2d_float(X)
-        yn = _ensure_1d_float(y)
-        if Xn.shape[0] != yn.shape[0]:
-            raise ValueError("X and y must have the same number of rows.")
+    def fit(self, X: ArrayLike, y: ArrayLike, feature_names: Optional[List[str]] = None) -> "AID":
+        X_arr, y_arr = self._validate_input(X, y)
 
-        self._X = Xn
-        self._y = yn
-        self.feature_names_ = feature_names if feature_names is not None else [f"x{i}" for i in range(Xn.shape[1])]
+        self._X = X_arr
+        self._y = y_arr
+        self.n_features_ = X_arr.shape[1]
+        self.feature_names_ = feature_names if feature_names is not None else [f"X{i}" for i in range(X_arr.shape[1])]
 
         if self.presort:
-            self._sorted_idx = [
-                np.argsort(self._X[:, j], kind="mergesort") for j in range(self._X.shape[1])
-            ]
+            self._presort_numeric_features()
         else:
-            self._sorted_idx = None
+            self._sorted_indices = None
 
-        # root stats (no copies)
-        idx = np.arange(yn.size, dtype=int)
-        sum_y = float(np.sum(yn))
-        sum_y2 = float(np.sum(yn * yn))
-        sse = _sse_from_stats(sum_y, sum_y2, int(yn.size))
-        mean = float(sum_y / max(int(yn.size), 1))
+        indices = np.arange(y_arr.size, dtype=int)
+        sum_y = float(np.sum(y_arr))
+        sum_y2 = float(np.sum(y_arr * y_arr))
+        sse = _compute_sse(sum_y, sum_y2, int(y_arr.size))
+        prediction = float(sum_y / max(int(y_arr.size), 1))
 
-        self.root_ = _Node(depth=0, n=int(yn.size), sse=sse, mean=mean, sum_y=sum_y, sum_y2=sum_y2)
+        self.root_ = AIDNode(depth=0, n_samples=int(y_arr.size), sse=sse,
+                             prediction=prediction, sum_y=sum_y, sum_y2=sum_y2)
 
         self.history_.clear()
-        self._leaves = 0
+        self._n_leaves = 0
 
-        self.root_ = self._grow(self.root_, idx, depth=0)
+        self.root_ = self._build_tree(self.root_, indices, depth=0)
         return self
 
-    def _can_split(self, node: _Node, depth: int) -> bool:
-        if depth >= self.Q:
-            return False
-        if node.n < self.M:
-            return False
-        if self._leaves >= self.max_leaves:
-            return False
-        # must be able to make 2 children of size >= R
-        if node.n < 2 * self.R:
-            return False
-        return True
+    def _validate_input(self, X, y) -> Tuple[np.ndarray, np.ndarray]:
+        X_arr = _ensure_2d_float(X)
+        y_arr = _ensure_1d_float(y)
+
+        if X_arr.shape[0] != y_arr.shape[0]:
+            raise ValueError(f"Shape mismatch: X has {X_arr.shape[0]} samples, y has {y_arr.shape[0]}")
+
+        if np.any(np.isnan(X_arr)) or np.any(np.isinf(X_arr)):
+            raise ValueError("X contains NaN or Inf")
+
+        if np.any(np.isnan(y_arr)) or np.any(np.isinf(y_arr)):
+            raise ValueError("y contains NaN or Inf")
+
+        return X_arr, y_arr
+
+    def _presort_numeric_features(self):
+        assert self._X is not None
+        self._sorted_indices = [
+            np.argsort(self._X[:, j], kind="mergesort") for j in range(self.n_features_)
+        ]
+
+    def _should_stop(self, node: AIDNode, depth: int) -> bool:
+        if depth >= self.max_depth:
+            return True
+        if node.n_samples < self.min_samples_split:
+            return True
+        if self._n_leaves >= self.max_leaves:
+            return True
+        if node.n_samples < 2 * self.min_samples_leaf:
+            return True
+        return False
 
     # -----------------------------
     # Split search (indices-based)
     # -----------------------------
-    def _find_best_split(self, idx: np.ndarray, parent: _Node) -> Optional[_SplitCandidate]:
-        """
-        Find best split across all features using SSE reduction.
+    def _feature_subset(self) -> np.ndarray:
+        k = _resolve_max_features(self.max_features, self.n_features_)
+        if k >= self.n_features_:
+            return np.arange(self.n_features_, dtype=int)
+        # deterministic given RNG state
+        return self._rng.choice(self.n_features_, size=k, replace=False)
 
-        Works on global X/y but restricted to sample indices idx.
-        No X/y submatrix copies are created.
-        """
+    def _find_best_split(self, indices: np.ndarray, parent_node: AIDNode) -> Optional[_SplitCandidate]:
         assert self._X is not None and self._y is not None
         X = self._X
         y = self._y
 
-        n = idx.size
-        p = X.shape[1]
-        if n < 2 * self.R:
+        n = indices.size
+        if n < 2 * self.min_samples_leaf:
             return None
 
         # mask for fast filtering (only if presort enabled)
-        if self._sorted_idx is not None:
+        if self._sorted_indices is not None:
             in_node = np.zeros(y.size, dtype=bool)
-            in_node[idx] = True
+            in_node[indices] = True
 
-        best: Optional[_SplitCandidate] = None
+        best_candidate: Optional[_SplitCandidate] = None
+        features = self._feature_subset()
 
-        for j in range(p):
-            if self._sorted_idx is not None:
-                # THAID-like: presorted globally, then filter with node mask
-                order_full = self._sorted_idx[j]
-                relevant = order_full[in_node[order_full]]
+        for feature_idx in features:
+            if self._sorted_indices is not None:
+                sorted_full = self._sorted_indices[feature_idx]
+                relevant = sorted_full[in_node[sorted_full]]
             else:
-                # fallback: sort just the node indices
-                relevant = idx[np.argsort(X[idx, j], kind="mergesort")]
+                relevant = indices[np.argsort(X[indices, feature_idx], kind="mergesort")]
 
-            if relevant.size < 2 * self.R:
+            if relevant.size < 2 * self.min_samples_leaf:
                 continue
 
-            x_sorted = X[relevant, j]
+            x_sorted = X[relevant, feature_idx]
             y_sorted = y[relevant]
 
             # candidate split positions where x changes
@@ -202,14 +260,14 @@ class AIDRegressor:
             if not np.any(diff_mask):
                 continue
 
-            pos = np.where(diff_mask)[0]  # split between pos and pos+1
+            split_positions = np.where(diff_mask)[0]  # split between pos and pos+1
 
-            # enforce min_child_size
-            left_n = pos + 1
+            # enforce min_samples_leaf
+            left_n = split_positions + 1
             right_n = relevant.size - left_n
-            ok = (left_n >= self.R) & (right_n >= self.R)
-            pos = pos[ok]
-            if pos.size == 0:
+            valid_mask = (left_n >= self.min_samples_leaf) & (right_n >= self.min_samples_leaf)
+            split_positions = split_positions[valid_mask]
+            if split_positions.size == 0:
                 continue
 
             csum_y = np.cumsum(y_sorted)
@@ -217,99 +275,99 @@ class AIDRegressor:
             total_sum = csum_y[-1]
             total_sum2 = csum_y2[-1]
 
-            left_sum = csum_y[pos]
-            left_sum2 = csum_y2[pos]
+            left_sum = csum_y[split_positions]
+            left_sum2 = csum_y2[split_positions]
             right_sum = total_sum - left_sum
             right_sum2 = total_sum2 - left_sum2
 
-            left_n_f = (pos + 1).astype(float)
-            right_n_f = (relevant.size - (pos + 1)).astype(float)
+            left_n_float = (split_positions + 1).astype(float)
+            right_n_float = (relevant.size - (split_positions + 1)).astype(float)
 
-            left_sse = left_sum2 - (left_sum * left_sum) / left_n_f
-            right_sse = right_sum2 - (right_sum * right_sum) / right_n_f
+            left_sse = left_sum2 - (left_sum * left_sum) / left_n_float
+            right_sse = right_sum2 - (right_sum * right_sum) / right_n_float
 
-            within = left_sse + right_sse
-            gains = parent.sse - within
+            within_sse = left_sse + right_sse
+            gains = parent_node.sse - within_sse
 
-            # F-stat (descriptive): gain / (within/(n-2))
-            denom = within / max(relevant.size - 2, 1)
-            f_stats = np.where(denom > 0, gains / denom, 0.0)
-
-            k = int(np.argmax(gains))
-            if gains[k] <= 0:
+            best_idx = int(np.argmax(gains))
+            best_gain = float(gains[best_idx])
+            if best_gain <= 0:
                 continue
 
-            cut = int(pos[k])
-            thr = float((x_sorted[cut] + x_sorted[cut + 1]) / 2.0)
+            # "F-stat" descriptive (gain divided by within/(n-2))
+            denom = float(within_sse[best_idx] / max(relevant.size - 2, 1))
+            f_stat = float(best_gain / denom) if denom > 0 else float("inf")
 
-            left_idx = relevant[: cut + 1]
-            right_idx = relevant[cut + 1 :]
+            split_pos = int(split_positions[best_idx])
+            split_value = float((x_sorted[split_pos] + x_sorted[split_pos + 1]) / 2.0)
 
-            cand = _SplitCandidate(
-                feature_index=j,
-                threshold=thr,
-                gain=float(gains[k]),
-                f_stat=float(f_stats[k]),
-                left_idx=left_idx,
-                right_idx=right_idx,
+            left_indices = relevant[: split_pos + 1]
+            right_indices = relevant[split_pos + 1 :]
+
+            candidate = _SplitCandidate(
+                feature_idx=int(feature_idx),
+                split_value=split_value,
+                gain=best_gain,
+                f_stat=f_stat,
+                left_indices=left_indices,
+                right_indices=right_indices,
             )
 
-            if best is None or cand.gain > best.gain:
-                best = cand
+            if best_candidate is None or candidate.gain > best_candidate.gain:
+                best_candidate = candidate
 
-        return best
+        return best_candidate
 
     # -----------------------------
     # Tree growth (indices-based)
     # -----------------------------
-    def _grow(self, node: _Node, idx: np.ndarray, depth: int) -> _Node:
-        if not self._can_split(node, depth):
-            self._leaves += 1
+    def _build_tree(self, node: AIDNode, indices: np.ndarray, depth: int) -> AIDNode:
+        if self._should_stop(node, depth):
+            self._n_leaves += 1
             return node
 
-        cand = self._find_best_split(idx, node)
-        if cand is None or cand.gain <= self.min_gain:
-            self._leaves += 1
+        candidate = self._find_best_split(indices, node)
+        if candidate is None or candidate.gain <= self.min_gain:
+            self._n_leaves += 1
             return node
 
         assert self._y is not None
         y = self._y
 
-        left_idx = cand.left_idx
-        right_idx = cand.right_idx
+        left_indices = candidate.left_indices
+        right_indices = candidate.right_indices
 
-        if left_idx.size < self.R or right_idx.size < self.R:
-            self._leaves += 1
+        if left_indices.size < self.min_samples_leaf or right_indices.size < self.min_samples_leaf:
+            self._n_leaves += 1
             return node
 
-        # compute child stats without copying X (only y indexing)
-        left_y = y[left_idx]
-        right_y = y[right_idx]
+        left_y = y[left_indices]
+        right_y = y[right_indices]
 
         left_sum = float(np.sum(left_y))
         left_sum2 = float(np.sum(left_y * left_y))
         right_sum = float(np.sum(right_y))
         right_sum2 = float(np.sum(right_y * right_y))
 
-        left_sse = _sse_from_stats(left_sum, left_sum2, int(left_y.size))
-        right_sse = _sse_from_stats(right_sum, right_sum2, int(right_y.size))
+        left_sse = _compute_sse(left_sum, left_sum2, int(left_y.size))
+        right_sse = _compute_sse(right_sum, right_sum2, int(right_y.size))
 
-        node.feature_index = cand.feature_index
-        node.threshold = cand.threshold
-        node.gain = cand.gain
-        node.f_stat = cand.f_stat
+        node.split_feature_idx = candidate.feature_idx
+        node.split_value = candidate.split_value
+        node.gain = candidate.gain
+        node.f_stat = candidate.f_stat
 
         if self.store_history:
             self.history_.append(
                 dict(
                     depth=depth,
-                    feature_index=cand.feature_index,
-                    feature_name=self.feature_names_[cand.feature_index] if self.feature_names_ else f"x{cand.feature_index}",
-                    threshold=cand.threshold,
-                    gain=cand.gain,
-                    f_stat=cand.f_stat,
-                    parent_n=node.n,
-                    parent_mean=node.mean,
+                    feature_idx=candidate.feature_idx,
+                    feature_name=self.feature_names_[candidate.feature_idx] if self.feature_names_ else f"X{candidate.feature_idx}",
+                    split_value=candidate.split_value,
+                    gain=candidate.gain,
+                    f_stat=candidate.f_stat,
+                    parent_n=node.n_samples,
+                    parent_mean=node.prediction,
                     parent_sse=node.sse,
                     n_left=int(left_y.size),
                     mean_left=float(left_sum / left_y.size),
@@ -320,99 +378,149 @@ class AIDRegressor:
                 )
             )
 
-        node.left = _Node(
+        node.left = AIDNode(
             depth=depth + 1,
-            n=int(left_y.size),
+            n_samples=int(left_y.size),
             sse=float(left_sse),
-            mean=float(left_sum / left_y.size),
+            prediction=float(left_sum / left_y.size),
             sum_y=left_sum,
             sum_y2=left_sum2,
         )
-        node.right = _Node(
+        node.right = AIDNode(
             depth=depth + 1,
-            n=int(right_y.size),
+            n_samples=int(right_y.size),
             sse=float(right_sse),
-            mean=float(right_sum / right_y.size),
+            prediction=float(right_sum / right_y.size),
             sum_y=right_sum,
             sum_y2=right_sum2,
         )
 
-        node.left = self._grow(node.left, left_idx, depth + 1)
-        node.right = self._grow(node.right, right_idx, depth + 1)
+        node.left = self._build_tree(node.left, left_indices, depth + 1)
+        node.right = self._build_tree(node.right, right_indices, depth + 1)
         return node
 
     # -----------------------------
-    # Predict (batch traversal)
+    # Predict
     # -----------------------------
     def predict(self, X: ArrayLike) -> np.ndarray:
         if self.root_ is None:
-            raise ValueError("Model is not fitted.")
-        Xn = _ensure_2d_float(X)
+            raise ValueError("Model not fitted")
+        X_arr = _ensure_2d_float(X)
 
-        preds = np.empty(Xn.shape[0], dtype=float)
-
-        # stack of (node, indices_of_rows_to_route)
-        stack: List[tuple[_Node, np.ndarray]] = [(self.root_, np.arange(Xn.shape[0], dtype=int))]
+        predictions = np.empty(X_arr.shape[0], dtype=float)
+        stack: List[Tuple[AIDNode, np.ndarray]] = [(self.root_, np.arange(X_arr.shape[0], dtype=int))]
 
         while stack:
             node, rows = stack.pop()
             if rows.size == 0:
                 continue
 
-            # leaf
-            if node.feature_index is None or node.threshold is None or node.left is None or node.right is None:
-                preds[rows] = node.mean
+            if node.is_leaf:
+                predictions[rows] = node.prediction
                 continue
 
-            j = node.feature_index
-            thr = node.threshold
-            xcol = Xn[rows, j]
-            go_left = xcol <= thr
+            feature_idx = int(node.split_feature_idx)  # type: ignore[arg-type]
+            split_value = float(node.split_value)      # type: ignore[arg-type]
+            x_col = X_arr[rows, feature_idx]
+            goes_left = x_col <= split_value
 
-            left_rows = rows[go_left]
-            right_rows = rows[~go_left]
+            left_rows = rows[goes_left]
+            right_rows = rows[~goes_left]
 
-            stack.append((node.left, left_rows))
-            stack.append((node.right, right_rows))
+            stack.append((node.left, left_rows))   # type: ignore[arg-type]
+            stack.append((node.right, right_rows)) # type: ignore[arg-type]
 
-        return preds
+        return predictions
 
     # -----------------------------
-    # Utilities
+    # Score / utilities
     # -----------------------------
+    def score(self, X: ArrayLike, y: ArrayLike) -> float:
+        y_arr = _ensure_1d_float(y)
+        y_pred = self.predict(X)
+
+        ss_res = float(np.sum((y_arr - y_pred) ** 2))
+        ss_tot = float(np.sum((y_arr - np.mean(y_arr)) ** 2))
+        return float(1 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
+
+    def mse(self, X: ArrayLike, y: ArrayLike) -> float:
+        y_arr = _ensure_1d_float(y)
+        y_pred = self.predict(X)
+        return float(np.mean((y_arr - y_pred) ** 2))
+
     def summary(self) -> str:
         if self.root_ is None:
-            return "AIDRegressor(not fitted)"
+            return "AID(not fitted)"
         n_splits = len(self.history_) if self.store_history else "N/A"
         return (
-            f"AIDRegressor(R={self.R}, M={self.M}, Q={self.Q}, min_gain={self.min_gain}, presort={self.presort})\n"
-            f"Root: n={self.root_.n}, mean={self.root_.mean:.6f}, sse={self.root_.sse:.6f}\n"
+            f"AID(min_samples_leaf={self.min_samples_leaf}, "
+            f"min_samples_split={self.min_samples_split}, "
+            f"max_depth={self.max_depth}, min_gain={self.min_gain}, presort={self.presort}, "
+            f"max_features={self.max_features}, random_state={self.random_state})\n"
+            f"Root: n={self.root_.n_samples}, mean={self.root_.prediction:.6f}, sse={self.root_.sse:.6f}\n"
             f"Splits stored: {n_splits}"
         )
 
-    def _node_to_dict(self, node: Optional[_Node]) -> Optional[Dict[str, Any]]:
-        if node is None:
-            return None
-        fname = None
-        if node.feature_index is not None and self.feature_names_ is not None:
-            fname = self.feature_names_[node.feature_index]
+    def print_tree(self, max_depth: Optional[int] = None):
+        if self.root_ is None:
+            print("Model not fitted")
+            return
+
+        def print_node(node: AIDNode, depth: int = 0):
+            if max_depth is not None and depth > max_depth:
+                return
+
+            indent = "  " * depth
+
+            if node.is_leaf:
+                print(f"{indent}Leaf: mean={node.prediction:.3f}, sse={node.sse:.3f}, n={node.n_samples}")
+            else:
+                feature_name = self.feature_names_[node.split_feature_idx] if self.feature_names_ else f"X{node.split_feature_idx}"
+                print(f"{indent}{feature_name} <= {node.split_value:.6f} (gain={node.gain:.6f}, F={node.f_stat:.2f}, n={node.n_samples})")
+                print_node(node.left, depth + 1)   # type: ignore[arg-type]
+                print_node(node.right, depth + 1)  # type: ignore[arg-type]
+
+        print_node(self.root_, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        if self.root_ is None:
+            raise ValueError("Model not fitted")
+
+        def node_to_dict(node: AIDNode) -> Dict[str, Any]:
+            d = {
+                "depth": node.depth,
+                "n_samples": node.n_samples,
+                "prediction": node.prediction,
+                "sse": node.sse,
+            }
+            if node.is_leaf:
+                d["is_leaf"] = True
+            else:
+                d["is_leaf"] = False
+                d["split_feature_idx"] = node.split_feature_idx
+                d["split_feature_name"] = self.feature_names_[node.split_feature_idx] if self.feature_names_ else f"X{node.split_feature_idx}"
+                d["split_value"] = node.split_value
+                d["gain"] = node.gain
+                d["f_stat"] = node.f_stat
+                d["left"] = node_to_dict(node.left)   # type: ignore[arg-type]
+                d["right"] = node_to_dict(node.right) # type: ignore[arg-type]
+            return d
+
         return {
-            "depth": node.depth,
-            "n": node.n,
-            "sum_y": node.sum_y,
-            "sum_y2": node.sum_y2,
-            "sse": node.sse,
-            "mean": node.mean,
-            "feature_index": node.feature_index,
-            "feature_name": fname,
-            "threshold": node.threshold,
-            "gain": node.gain,
-            "f_stat": node.f_stat,
-            "left": self._node_to_dict(node.left),
-            "right": self._node_to_dict(node.right),
+            "params": {
+                "min_samples_leaf": self.min_samples_leaf,
+                "min_samples_split": self.min_samples_split,
+                "max_depth": self.max_depth,
+                "min_gain": self.min_gain,
+                "presort": self.presort,
+                "max_features": self.max_features,
+                "random_state": self.random_state,
+            },
+            "tree": node_to_dict(self.root_),
+            "history": self.history_ if self.store_history else None,
         }
 
-    def to_json(self) -> str:
-        if self.root_ is None:
-            raise ValueError("Model is not fitted.")
-        return json.dumps(self._node_to_dict(self.root_), ensure_ascii=False)
+    def to_json(self, path: str):
+        obj = self.to_dict()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
