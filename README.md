@@ -196,14 +196,12 @@ Please ensure your code follows the existing style and includes appropriate test
 
 - Original AID algorithm developed by **Morgan & Sonquist (1963)**
 - THAID algorithm introduced by **Morgan & Messenger (1973)**
-- Inspired by foundational work in statistical segmentation and decision tree theory
-- Thanks to all contributors and the open-source community
 
 ---
 
 ## 📧 Contact & Support
 
-- **Author**: [1achraf1](https://github.com/1achraf1)
+- **Authors**: [1achraf1](https://github.com/1achraf1) [ZIADEA](https://github.com/ZIADEA) [Asmaeelhakioui](https://github.com/Asmaeelhakioui)
 - **Issues**: [GitHub Issues](https://github.com/1achraf1/AID-THAID-Implementation/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/1achraf1/AID-THAID-Implementation/discussions)
 
@@ -212,7 +210,5 @@ Please ensure your code follows the existing style and includes appropriate test
 <div align="center">
 
 **⭐ Star this repository if you find it helpful!**
-
-Made with ❤️ for the data science community
 
 </div>
